@@ -15,6 +15,8 @@ EUTILS = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 EUROPEPMC = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
 ARXIV = "https://export.arxiv.org/api/query"
 CROSSREF = "https://api.crossref.org/works"
+OPENALEX = "https://api.openalex.org/works"
+EUROPEPMC_FULLTEXT = "https://www.ebi.ac.uk/europepmc/webservices/rest/{pmcid}/fullTextXML"
 
 ATOM = "{http://www.w3.org/2005/Atom}"
 ARXIV_NS = "{http://arxiv.org/schemas/atom}"
@@ -62,10 +64,12 @@ def parse_pubmed_xml(xml: str) -> list[dict[str, Any]]:
         year = ""
         if pub_date is not None:
             year = pub_date.findtext("Year") or pub_date.findtext("MedlineDate", "")[:4]
-        doi = ""
+        doi = pmcid = ""
         for aid in art.findall("PubmedData/ArticleIdList/ArticleId"):
             if aid.get("IdType") == "doi":
                 doi = aid.text or ""
+            elif aid.get("IdType") == "pmc":
+                pmcid = aid.text or ""
         papers.append({
             "title": _text(article.find("ArticleTitle")),
             "authors": _authors(authors),
@@ -73,6 +77,7 @@ def parse_pubmed_xml(xml: str) -> list[dict[str, Any]]:
             "year": year,
             "doi": doi,
             "pmid": pmid,
+            "pmcid": pmcid,
             "url": f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
             "abstract": " ".join(abstract_parts),
         })
@@ -107,6 +112,7 @@ def parse_europepmc(data: dict[str, Any]) -> list[dict[str, Any]]:
             "year": r.get("pubYear", ""),
             "doi": doi,
             "pmid": r.get("pmid", ""),
+            "pmcid": r.get("pmcid", ""),
             "url": f"https://doi.org/{doi}" if doi else f"https://europepmc.org/article/{r.get('source')}/{r.get('id')}",
             "cited_by": r.get("citedByCount"),
             "open_access": r.get("isOpenAccess") == "Y",
@@ -180,11 +186,72 @@ def _search_crossref(query: str, max_results: int, year_from: int | None) -> lis
     return parse_crossref(http.get_json(CROSSREF, params))
 
 
+def _openalex_abstract(inverted: dict[str, list[int]] | None) -> str:
+    if not inverted:
+        return ""
+    words = sorted((pos, word) for word, positions in inverted.items() for pos in positions)
+    return _clean(" ".join(word for _, word in words))
+
+
+def parse_openalex(data: dict[str, Any]) -> list[dict[str, Any]]:
+    papers = []
+    for w in data.get("results", []):
+        doi = (w.get("doi") or "").removeprefix("https://doi.org/")
+        pmcid = ((w.get("ids") or {}).get("pmcid") or "").rstrip("/").rsplit("/", 1)[-1]
+        source = ((w.get("primary_location") or {}).get("source") or {})
+        papers.append({
+            "title": _clean(w.get("display_name")),
+            "authors": _authors([(a.get("author") or {}).get("display_name", "") for a in w.get("authorships", [])]),
+            "journal": source.get("display_name") or "",
+            "year": str(w.get("publication_year") or ""),
+            "doi": doi,
+            "pmcid": pmcid,
+            "url": f"https://doi.org/{doi}" if doi else w.get("id", ""),
+            "cited_by": w.get("cited_by_count"),
+            "open_access": bool((w.get("open_access") or {}).get("is_oa")),
+            "abstract": _openalex_abstract(w.get("abstract_inverted_index")),
+        })
+    return papers
+
+
+def _search_openalex(query: str, max_results: int, year_from: int | None) -> list[dict[str, Any]]:
+    params: dict[str, Any] = {"search": query, "per-page": max_results}
+    if year_from:
+        params["filter"] = f"from_publication_date:{year_from}-01-01"
+    if os.environ.get("OPENALEX_API_KEY"):
+        params["api_key"] = os.environ["OPENALEX_API_KEY"]
+    return parse_openalex(http.get_json(OPENALEX, params))
+
+
+def parse_jats_body(xml: str) -> str:
+    """Plain text of a JATS article body (section titles and paragraphs), without references."""
+    root = ET.fromstring(xml)
+    body = root.find(".//body")
+    if body is None:
+        return ""
+    parts = []
+    for el in body.iter():
+        if el.tag == "title":
+            parts.append(f"\n## {_text(el)}")
+        elif el.tag == "p":
+            parts.append(_text(el))
+    return "\n".join(p for p in parts if p.strip()).strip()
+
+
+def europepmc_full_text(pmcid: str) -> str:
+    """Open-access full text from Europe PMC, or '' if it is not available."""
+    try:
+        return parse_jats_body(http.get_text(EUROPEPMC_FULLTEXT.format(pmcid=pmcid)))
+    except Exception:
+        return ""
+
+
 SOURCES = {
     "europepmc": _search_europepmc,
     "pubmed": _search_pubmed,
     "arxiv": _search_arxiv,
     "crossref": _search_crossref,
+    "openalex": _search_openalex,
 }
 
 
@@ -194,8 +261,8 @@ SOURCES = {
     "abstract. Sources: 'europepmc' (default; life sciences + chemistry, includes ChemRxiv preprints and "
     "citation counts), 'pubmed' (biomedical, medicinal chemistry, toxicology), 'arxiv' (physical/theoretical/"
     "computational chemistry, materials; supports arXiv syntax like 'cat:physics.chem-ph AND ti:DFT'), "
-    "'crossref' (all publishers incl. ACS, RSC, Elsevier, Wiley; best coverage of chemistry journals, "
-    "abstracts often missing). Call several sources in parallel for a thorough review.",
+    "'crossref' (all publishers incl. ACS, RSC, Elsevier, Wiley; abstracts often missing), 'openalex' "
+    "(broadest index of all disciplines and publishers, with abstracts and citation counts). Call several sources in parallel for a thorough review.",
     {
         "query": {"type": "string", "minLength": 1, "description": "Keywords or a boolean query."},
         "source": {"type": "string", "enum": list(SOURCES)},

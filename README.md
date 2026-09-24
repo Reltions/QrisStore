@@ -24,6 +24,7 @@ Optional keys (see `.env.example`):
 |---|---|
 | `MP_API_KEY` | `materials_project_properties`: band gaps, stability, formation energies ([free key](https://next-gen.materialsproject.org/api)) |
 | `NCBI_API_KEY` | Higher PubMed rate limit |
+| `OPENALEX_API_KEY` | Higher OpenAlex limits (optional) |
 | `CHEM_AGENT_MODEL` | Default model override (default `claude-opus-5`) |
 
 ## Usage
@@ -67,11 +68,51 @@ agent = ResearchAgent(effort="medium")
 print(agent.ask("SMILES and logP of ibuprofen?"))
 ```
 
+## Research-gap workflow
+
+`chem-gaps` runs a fixed, reproducible pipeline: it reads the literature on a topic, finds research gaps,
+checks that nobody has already filled them, and designs studies for the gaps that remain open.
+
+```bash
+chem-gaps "stability of tin halide perovskite solar cells" --year-from 2019 \
+  --context "we have XRD, XPS, a glovebox and access to DFT"
+```
+
+| Step | What happens | API |
+|---|---|---|
+| 1. Plan | Topic becomes a research question, inclusion/exclusion criteria, and 6-12 search queries | Claude |
+| 2. Retrieve | Queries run across sources; results are merged and deduplicated by DOI/title | OpenAlex, Europe PMC, PubMed, arXiv, Crossref |
+| 3. Screen | Each title/abstract is scored 0-10 against the criteria; the top N are kept | Claude |
+| 4. Full text | Open-access papers are read in full (methods and limitations rarely fit in abstracts) | Europe PMC |
+| 5. Extract | Per paper: study type, systems, methods, findings with units, stated limitations, future work, open questions | Claude |
+| 6. Gaps | Compares all extractions: unexplored combinations, contradictions, recurring limitations, missing methods, undone future work, each citing papers | Claude |
+| 7. Novelty check | Each gap is searched for again; gaps that newer work already fills are marked "addressed" | OpenAlex, Europe PMC, Claude |
+| 8. Methods | For each open gap: hypothesis, steps, computational methods, characterization, controls, methods to reuse from cited papers, metrics, risks, safety | Claude |
+| 9. Report | `report.md` with summary table, search strategy, evidence table, gaps, study designs, references | |
+
+Every step saves its output (`plan.json`, `screening.json`, `extractions/`, `gaps.json`, `novelty.json`,
+`methods/`) in `runs/<date>-<topic>/`. If a run stops, the same command resumes it. You can also edit a
+file, for example removing a gap from `gaps.json`, and re-run from that point by deleting the later files.
+
+Every Claude call uses structured outputs, so each step returns validated JSON. Routine steps run at
+`medium` effort and the gap analysis and study design at `high`, both configurable. Useful flags:
+`-n/--max-papers` (default 30), `-g/--max-gaps` (default 6), `--no-full-text`, `-e/--effort`,
+`--extract-effort`, `-w/--workers`.
+
+From Python:
+
+```python
+from pathlib import Path
+from chem_agent.workflow import GapWorkflow, WorkflowConfig
+
+report = GapWorkflow(WorkflowConfig(topic="MOF catalysts for CO2 hydrogenation", run_dir=Path("runs/mof"))).run()
+```
+
 ## Tools
 
 | Area | Tool | Source |
 |---|---|---|
-| Literature | `search_literature` | Europe PMC (incl. ChemRxiv preprints), PubMed, arXiv, Crossref |
+| Literature | `search_literature` | Europe PMC (incl. ChemRxiv preprints), PubMed, arXiv, Crossref, OpenAlex |
 | | `web_search`, `web_fetch` | Web, including open-access full texts (run by Anthropic) |
 | Compounds | `pubchem_compound` | Names to SMILES, identifiers, computed properties, synonyms |
 | | `pubchem_safety` | GHS pictograms, H-statements, precautionary codes |
