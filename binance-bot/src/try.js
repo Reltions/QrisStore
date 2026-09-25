@@ -1,9 +1,9 @@
-// تجربة سريعة على Testnet: يتأكد من الاتصال، ويعرض السعر والرصيد والإشارة الحالية
+// تجربة سريعة على Testnet: يتأكد من الاتصال، ويعرض السعر والرصيد وإشارة كل استراتيجية
 // ومع --trade يشتري بـ 10 دولار وهمية ويبيعها بعد 10 ثواني
 // الاستخدام: npm run try          أو   npm run try -- --trade
 const config = require('./config');
 const { createExchange } = require('./exchange');
-const { evaluate } = require('./strategy');
+const { STRATEGIES, WARMUP, evaluate } = require('./strategies');
 
 async function main() {
   if (!config.binance.testnet) throw new Error('هذي التجربة للـ Testnet بس. خل TESTNET=true');
@@ -22,12 +22,9 @@ async function main() {
   const balance = await exchange.fetchBalance();
   console.log(`3) رصيدك: ${balance[quote]?.free ?? 0} ${quote} | ${balance[base]?.free ?? 0} ${base}`);
 
-  const candles = await exchange.fetchOHLCV(symbol, timeframe, undefined, 200);
-  const closes = candles.slice(0, -1).map((c) => c[4]);
-  const s = evaluate(closes, config.strategy);
-  console.log(
-    `4) الإشارة الحين: ${s.signal} | EMA ${s.fast.toFixed(2)} / ${s.slow.toFixed(2)} | RSI ${s.rsi.toFixed(1)}`
-  );
+  const candles = (await exchange.fetchOHLCV(symbol, timeframe, undefined, WARMUP * 2)).slice(0, -1);
+  console.log('4) إشارة كل استراتيجية الحين:');
+  for (const st of STRATEGIES) console.log(`   ${evaluate(st, candles).padEnd(5)} ${st.name}`);
 
   if (!process.argv.includes('--trade')) {
     console.log('\nكل شي تمام. جرب: npm run try -- --trade  عشان يسوي صفقة تجريبية.');

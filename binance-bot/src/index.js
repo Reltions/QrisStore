@@ -1,8 +1,9 @@
 const config = require('./config');
-const { createExchange } = require('./exchange');
+const { createExchange, createPublicExchange } = require('./exchange');
 const { Trader } = require('./trader');
 const stateStore = require('./state');
 const { startDiscord } = require('./discord');
+const { fetchHistory, optimize } = require('./optimizer');
 
 async function main() {
   const exchange = createExchange(config.binance);
@@ -18,8 +19,19 @@ async function main() {
     saveState: stateStore.save,
   });
 
+  // الاختبار يكون على أسعار السوق الحقيقي حتى لو التداول على Testnet،
+  // لأن أسعار Testnet ما تمثل السوق
+  const market = createPublicExchange();
+  async function runOptimization() {
+    const { symbol, timeframe } = config.strategy;
+    const candles = await fetchHistory(market, symbol, timeframe, config.optimize.days);
+    const opt = optimize(candles, config.risk);
+    await trader.applyOptimization(opt);
+    return opt;
+  }
+
   if (config.discord.token) {
-    const { notify } = await startDiscord({ config, trader });
+    const { notify } = await startDiscord({ config, trader, runOptimization });
     trader.notify = notify;
   } else {
     // بدون ديسكورد: يشتغل ويطبع كل شي في الـ console
@@ -31,6 +43,16 @@ async function main() {
   console.log(
     `الوضع: ${config.binance.testnet ? 'Testnet' : 'حقيقي'} | ${config.strategy.symbol} ${config.strategy.timeframe} | كل ${config.loopSeconds} ثانية`
   );
+
+  const safeOptimize = () =>
+    runOptimization().catch((err) => trader.notify(`⚠️ فشل اختبار الاستراتيجيات: ${err.message}`));
+
+  if (config.strategy.mode === 'auto') {
+    console.log(`جاري اختبار الست استراتيجيات على آخر ${config.optimize.days} يوم ...`);
+    await safeOptimize();
+    setInterval(safeOptimize, config.optimize.everyHours * 3600e3);
+  }
+
   await trader.tick();
   setInterval(() => trader.tick(), config.loopSeconds * 1000);
 }

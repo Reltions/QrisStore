@@ -1,4 +1,5 @@
 require('dotenv').config();
+const { getStrategy } = require('./strategies');
 
 function num(name, fallback) {
   const raw = process.env[name];
@@ -24,10 +25,12 @@ const config = {
   strategy: {
     symbol: process.env.SYMBOL || 'BTC/USDT',
     timeframe: process.env.TIMEFRAME || '15m',
-    emaFast: num('EMA_FAST', 9),
-    emaSlow: num('EMA_SLOW', 21),
-    rsiPeriod: num('RSI_PERIOD', 14),
-    rsiMax: num('RSI_MAX', 70),
+    // auto = يختبر الست ويختار الأفضل، أو اكتب id وحدة معينة
+    mode: process.env.STRATEGY || 'auto',
+  },
+  optimize: {
+    days: num('OPTIMIZE_DAYS', 60),
+    everyHours: num('OPTIMIZE_EVERY_HOURS', 24),
   },
   risk: {
     tradeAmountUsdt: num('TRADE_AMOUNT_USDT', 10),
@@ -38,8 +41,8 @@ const config = {
   loopSeconds: num('LOOP_SECONDS', 60),
 };
 
-if (config.strategy.emaFast >= config.strategy.emaSlow) {
-  throw new Error('EMA_FAST لازم يكون أصغر من EMA_SLOW');
+if (config.strategy.mode !== 'auto' && !getStrategy(config.strategy.mode)) {
+  throw new Error(`STRATEGY غير معروفة: ${config.strategy.mode}`);
 }
 
 module.exports = config;

@@ -8,6 +8,7 @@ const DEFAULT_STATE = {
   position: null, // { amount, entryPrice, cost, openedAt }
   daily: { date: '', pnl: 0, limitNotified: false },
   trades: [], // آخر الصفقات المقفلة
+  optimization: null, // آخر نتيجة لاختبار الست استراتيجيات
 };
 
 function load() {

@@ -7,6 +7,7 @@ const {
   MessageFlags,
 } = require('discord.js');
 const { fmt } = require('./trader');
+const { getStrategy } = require('./strategies');
 
 const commands = [
   new SlashCommandBuilder().setName('status').setDescription('حالة البوت والصفقة المفتوحة'),
@@ -16,9 +17,27 @@ const commands = [
   new SlashCommandBuilder().setName('stop').setDescription('إيقاف فتح صفقات جديدة'),
   new SlashCommandBuilder().setName('close').setDescription('بيع الصفقة المفتوحة الحين'),
   new SlashCommandBuilder().setName('trades').setDescription('آخر 10 صفقات'),
+  new SlashCommandBuilder().setName('strategies').setDescription('نتيجة اختبار الست استراتيجيات'),
+  new SlashCommandBuilder().setName('optimize').setDescription('أعد اختبار الست استراتيجيات الحين واختر الأفضل'),
 ].map((c) => c.setDMPermission(false).toJSON());
 
-async function startDiscord({ config, trader }) {
+function strategiesTable(opt) {
+  if (!opt) return 'لسا ما صار اختبار.';
+  const lines = [
+    `**آخر اختبار:** ${opt.from.slice(0, 10)} → ${opt.to.slice(0, 10)} | لو اشتريت وخليتها: ${fmt(opt.buyAndHoldPct)}%`,
+    '',
+  ];
+  opt.results.forEach((r, i) => {
+    const tag = r.id === opt.bestId ? '⭐' : r.qualified ? '✅' : '❌';
+    lines.push(
+      `${tag} **${i + 1}. ${r.name}**\n   تدريب ${fmt(r.train.pnlPct)}% | تحقق ${fmt(r.test.pnlPct)}% | ${r.test.trades} صفقة | فوز ${fmt(r.test.winRate)}%`
+    );
+  });
+  if (!opt.bestId) lines.push('', '⛔ ولا وحدة نجحت، البوت ما يفتح صفقات جديدة.');
+  return lines.join('\n');
+}
+
+async function startDiscord({ config, trader, runOptimization }) {
   const { token, guildId, ownerId, notifyChannelId } = config.discord;
   if (!ownerId) throw new Error('حط OWNER_ID في ملف .env عشان الأوامر تكون لك إنت بس');
 
@@ -40,11 +59,8 @@ async function startDiscord({ config, trader }) {
         `**الزوج:** ${config.strategy.symbol} | ${config.strategy.timeframe}`,
         `**ربح/خسارة اليوم:** ${fmt(s.daily.pnl)} USDT`,
       ];
-      if (sig) {
-        lines.push(
-          `**آخر إشارة:** ${sig.signal} | EMA ${fmt(sig.fast ?? 0)} / ${fmt(sig.slow ?? 0)} | RSI ${fmt(sig.rsi ?? 0, 1)}`
-        );
-      }
+      lines.push(`**الاستراتيجية:** ${trader.strategy ? `${trader.strategy.name} ${config.strategy.mode === 'auto' ? '(مختارة تلقائيًا)' : '(ثابتة)'}` : '⛔ ما فيه استراتيجية ناجحة حاليًا'}`);
+      if (sig) lines.push(`**آخر إشارة:** ${sig.signal}`);
       if (s.position) {
         const ticker = await trader.exchange.fetchTicker(config.strategy.symbol);
         const change = ((ticker.last - s.position.entryPrice) / s.position.entryPrice) * 100;
@@ -82,6 +98,17 @@ async function startDiscord({ config, trader }) {
       if (!trader.state.position) return 'ما فيه صفقة مفتوحة.';
       const pnl = await trader.closePosition('بيع يدوي');
       return `تم البيع. الربح/الخسارة: ${fmt(pnl)} USDT`;
+    },
+
+    async strategies() {
+      return strategiesTable(trader.state.optimization);
+    },
+
+    async optimize() {
+      if (config.strategy.mode !== 'auto') {
+        return `الاستراتيجية ثابتة (${getStrategy(config.strategy.mode).name}). خل STRATEGY=auto عشان يختار تلقائيًا.`;
+      }
+      return strategiesTable(await runOptimization());
     },
 
     async trades() {

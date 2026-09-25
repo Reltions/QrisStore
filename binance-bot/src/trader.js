@@ -1,4 +1,4 @@
-const { evaluate } = require('./strategy');
+const { evaluate, getStrategy, WARMUP } = require('./strategies');
 
 const MAX_TRADES_KEPT = 50;
 
@@ -19,6 +19,29 @@ class Trader {
     this.notify = notify || (async () => {});
     this.busy = false;
     this.lastSignal = null;
+    // الاستراتيجية الحالية. null = ما فيه استراتيجية ناجحة، فما يفتح صفقات جديدة
+    this.strategy = null;
+    if (config.strategy.mode !== 'auto') this.strategy = getStrategy(config.strategy.mode);
+    else if (state.optimization?.bestId) this.strategy = getStrategy(state.optimization.bestId);
+  }
+
+  // يستقبل نتيجة الـ optimizer ويغير الاستراتيجية لو لزم
+  async applyOptimization(opt) {
+    const prevId = this.strategy?.id ?? null;
+    this.state.optimization = opt;
+    if (this.config.strategy.mode === 'auto') this.strategy = opt.bestId ? getStrategy(opt.bestId) : null;
+    this.saveState(this.state);
+
+    const newId = this.strategy?.id ?? null;
+    if (newId === prevId) return;
+    if (this.strategy) {
+      const r = opt.results.find((x) => x.id === newId);
+      await this.notify(
+        `🧠 **غيرت الاستراتيجية إلى:** ${this.strategy.name}\n${this.strategy.idea}\nنتيجتها في فترة التحقق: ${fmt(r.test.pnlPct)}% | فوز ${fmt(r.test.winRate)}% | ${r.test.trades} صفقة`
+      );
+    } else {
+      await this.notify('⛔ ولا استراتيجية من الست نجحت على البيانات الأخيرة. وقفت فتح صفقات جديدة لين تتحسن الظروف.');
+    }
   }
 
   get symbol() {
@@ -47,14 +70,13 @@ class Trader {
     try {
       this.resetDailyIfNeeded();
       const { symbol } = this;
-      const { timeframe, emaSlow, rsiPeriod } = this.config.strategy;
+      const { timeframe } = this.config.strategy;
 
-      const limit = Math.max(emaSlow, rsiPeriod) * 5 + 2;
-      const candles = await this.exchange.fetchOHLCV(symbol, timeframe, undefined, limit);
+      const candles = await this.exchange.fetchOHLCV(symbol, timeframe, undefined, WARMUP * 2);
       // آخر شمعة لسا ما قفلت، نتجاهلها عشان الإشارة ما تتغير
-      const closes = candles.slice(0, -1).map((c) => c[4]);
-      const result = evaluate(closes, this.config.strategy);
-      this.lastSignal = { ...result, at: new Date().toISOString() };
+      const closed = candles.slice(0, -1);
+      const signal = this.strategy ? evaluate(this.strategy, closed) : 'hold';
+      this.lastSignal = { signal, strategyId: this.strategy?.id ?? null, at: new Date().toISOString() };
 
       const ticker = await this.exchange.fetchTicker(symbol);
       const price = ticker.last;
@@ -66,10 +88,10 @@ class Trader {
           await this.closePosition(`وقف خسارة (${fmt(changePct)}%)`);
         } else if (changePct >= this.config.risk.takeProfitPct) {
           await this.closePosition(`جني ربح (+${fmt(changePct)}%)`);
-        } else if (result.signal === 'sell') {
-          await this.closePosition('إشارة بيع (تقاطع هابط)');
+        } else if (signal === 'sell') {
+          await this.closePosition('إشارة بيع');
         }
-      } else if (this.state.running && result.signal === 'buy') {
+      } else if (this.state.running && signal === 'buy') {
         if (this.dailyLimitHit()) {
           if (!this.state.daily.limitNotified) {
             this.state.daily.limitNotified = true;
