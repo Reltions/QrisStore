@@ -18,7 +18,12 @@ class Trader {
     this.saveState = saveState;
     this.notify = notify || (async () => {});
     this.busy = false;
+    this.queue = Promise.resolve();
+    this.tickPending = false;
     this.lastSignal = null;
+    this.lastPrice = null;
+    this.lastPriceAt = 0;
+    this.lastErrorNotifyAt = 0;
     // الاستراتيجية الحالية. null = ما فيه استراتيجية ناجحة، فما يفتح صفقات جديدة
     this.strategy = null;
     if (config.strategy.mode !== 'auto') this.strategy = getStrategy(config.strategy.mode);
@@ -63,53 +68,115 @@ class Trader {
     return this.state.daily.pnl <= -this.config.risk.maxDailyLossUsdt;
   }
 
-  // دورة وحدة: يقرأ السوق ويقرر
-  async tick() {
-    if (this.busy) return;
-    this.busy = true;
-    try {
-      this.resetDailyIfNeeded();
-      const { symbol } = this;
-      const { timeframe } = this.config.strategy;
-
-      const candles = await this.exchange.fetchOHLCV(symbol, timeframe, undefined, WARMUP * 2);
-      // آخر شمعة لسا ما قفلت، نتجاهلها عشان الإشارة ما تتغير
-      const closed = candles.slice(0, -1);
-      const signal = this.strategy ? evaluate(this.strategy, closed) : 'hold';
-      this.lastSignal = { signal, strategyId: this.strategy?.id ?? null, at: new Date().toISOString() };
-
-      const ticker = await this.exchange.fetchTicker(symbol);
-      const price = ticker.last;
-      const pos = this.state.position;
-
-      if (pos) {
-        const changePct = ((price - pos.entryPrice) / pos.entryPrice) * 100;
-        if (changePct <= -this.config.risk.stopLossPct) {
-          await this.closePosition(`وقف خسارة (${fmt(changePct)}%)`);
-        } else if (changePct >= this.config.risk.takeProfitPct) {
-          await this.closePosition(`جني ربح (+${fmt(changePct)}%)`);
-        } else if (signal === 'sell') {
-          await this.closePosition('إشارة بيع');
-        }
-      } else if (this.state.running && signal === 'buy') {
-        if (this.dailyLimitHit()) {
-          if (!this.state.daily.limitNotified) {
-            this.state.daily.limitNotified = true;
-            this.saveState(this.state);
-            await this.notify(
-              `⛔ وصلت حد الخسارة اليومي (${fmt(this.state.daily.pnl)} USDT). ما راح أفتح صفقات جديدة لين بكرة.`
-            );
-          }
-        } else {
-          await this.openPosition(price);
-        }
+  // كل العمليات اللي تشتري أو تبيع تمشي وحدة وحدة، عشان ما يصير بيع مرتين لنفس الصفقة
+  exclusive(fn) {
+    const run = this.queue.then(async () => {
+      this.busy = true;
+      try {
+        return await fn();
+      } finally {
+        this.busy = false;
       }
+    });
+    this.queue = run.catch(() => {});
+    return run;
+  }
+
+  // يرسل الأخطاء لديسكورد مرة كل 5 دقايق بالكثير (عشان ما يزعجك لو النت فصل)
+  async reportError(where, err) {
+    console.error(`[${where}]`, err.message);
+    if (Date.now() - this.lastErrorNotifyAt < 5 * 60e3) return;
+    this.lastErrorNotifyAt = Date.now();
+    await this.notify(`⚠️ خطأ (${where}): ${err.message}`);
+  }
+
+  // يتنادى مع كل تحديث سعر لحظي (كل ثانية تقريبًا من WebSocket)
+  // يفحص وقف الخسارة وجني الربح بس، لأن إشارات الاستراتيجية تنحسب على الشموع المقفلة
+  async onPrice(price) {
+    this.lastPrice = price;
+    this.lastPriceAt = Date.now();
+    if (this.busy || !this.state.position) return;
+    try {
+      await this.exclusive(() => this.checkExits(price, 'hold'));
     } catch (err) {
-      console.error('[tick]', err);
-      await this.notify(`⚠️ خطأ: ${err.message}`);
-    } finally {
-      this.busy = false;
+      await this.reportError('price', err);
     }
+  }
+
+  // يرجع true إذا باع
+  async checkExits(price, signal) {
+    const pos = this.state.position;
+    if (!pos) return false;
+    const changePct = ((price - pos.entryPrice) / pos.entryPrice) * 100;
+    if (changePct <= -this.config.risk.stopLossPct) {
+      await this.closePosition(`وقف خسارة (${fmt(changePct)}%)`);
+    } else if (changePct >= this.config.risk.takeProfitPct) {
+      await this.closePosition(`جني ربح (+${fmt(changePct)}%)`);
+    } else if (signal === 'sell') {
+      await this.closePosition('إشارة بيع');
+    } else {
+      return false;
+    }
+    return true;
+  }
+
+  // دورة كاملة: يحسب إشارة الاستراتيجية من الشموع ويقرر يشتري أو يبيع
+  async tick() {
+    if (this.tickPending) return;
+    this.tickPending = true;
+    try {
+      await this.exclusive(() => this.runTick());
+    } catch (err) {
+      await this.reportError('tick', err);
+    } finally {
+      this.tickPending = false;
+    }
+  }
+
+  async runTick() {
+    this.resetDailyIfNeeded();
+    const { symbol } = this;
+    const { timeframe } = this.config.strategy;
+
+    const candles = await this.exchange.fetchOHLCV(symbol, timeframe, undefined, WARMUP * 2);
+    // آخر شمعة لسا ما قفلت، نتجاهلها عشان الإشارة ما تتغير
+    const closed = candles.slice(0, -1);
+    const signal = this.strategy ? evaluate(this.strategy, closed) : 'hold';
+    this.lastSignal = {
+      signal,
+      strategyId: this.strategy?.id ?? null,
+      candle: closed.length ? new Date(closed[closed.length - 1][0]).toISOString() : null,
+      at: new Date().toISOString(),
+    };
+
+    const ticker = await this.exchange.fetchTicker(symbol);
+    const price = ticker.last;
+    this.lastPrice = price;
+    this.lastPriceAt = Date.now();
+
+    if (this.state.position) {
+      await this.checkExits(price, signal);
+    } else if (this.state.running && signal === 'buy') {
+      // ما نشتري مرتين على نفس الشمعة
+      if (this.state.lastBuyCandle === this.lastSignal.candle) return;
+      if (this.dailyLimitHit()) {
+        if (!this.state.daily.limitNotified) {
+          this.state.daily.limitNotified = true;
+          this.saveState(this.state);
+          await this.notify(
+            `⛔ وصلت حد الخسارة اليومي (${fmt(this.state.daily.pnl)} USDT). ما راح أفتح صفقات جديدة لين بكرة.`
+          );
+        }
+      } else {
+        this.state.lastBuyCandle = this.lastSignal.candle;
+        await this.openPosition(price);
+      }
+    }
+  }
+
+  // بيع يدوي (من ديسكورد)
+  closeNow(reason) {
+    return this.exclusive(() => this.closePosition(reason));
   }
 
   async openPosition(price) {

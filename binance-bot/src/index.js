@@ -4,6 +4,7 @@ const { Trader } = require('./trader');
 const stateStore = require('./state');
 const { startDiscord } = require('./discord');
 const { fetchHistory, optimize } = require('./optimizer');
+const { startPriceFeed, onEveryCandleClose } = require('./priceFeed');
 
 async function main() {
   const exchange = createExchange(config.binance);
@@ -40,12 +41,16 @@ async function main() {
     trader.setRunning(true);
   }
 
+  const { symbol, timeframe } = config.strategy;
   console.log(
-    `الوضع: ${config.binance.testnet ? 'Testnet' : 'حقيقي'} | ${config.strategy.symbol} ${config.strategy.timeframe} | كل ${config.loopSeconds} ثانية`
+    `الوضع: ${config.binance.testnet ? 'Testnet' : 'حقيقي'} | ${symbol} ${timeframe}\n` +
+      `  - السعر اللحظي (WebSocket): كل ثانية تقريبًا، يفحص وقف الخسارة وجني الربح\n` +
+      `  - إشارة الاستراتيجية: فور ما تقفل كل شمعة ${timeframe}، ومعها فحص احتياطي كل ${config.loopSeconds} ثانية\n` +
+      `  - اختيار أفضل استراتيجية: كل ${config.optimize.everyHours} ساعة`
   );
 
   const safeOptimize = () =>
-    runOptimization().catch((err) => trader.notify(`⚠️ فشل اختبار الاستراتيجيات: ${err.message}`));
+    runOptimization().catch((err) => trader.reportError('optimize', err));
 
   if (config.strategy.mode === 'auto') {
     console.log(`جاري اختبار الست استراتيجيات على آخر ${config.optimize.days} يوم ...`);
@@ -54,7 +59,14 @@ async function main() {
   }
 
   await trader.tick();
+  onEveryCandleClose(exchange.parseTimeframe(timeframe) * 1000, () => trader.tick());
   setInterval(() => trader.tick(), config.loopSeconds * 1000);
+
+  startPriceFeed({
+    config,
+    onPrice: (price) => trader.onPrice(price),
+    onStatus: (msg) => trader.notify(msg),
+  });
 }
 
 main().catch((err) => {

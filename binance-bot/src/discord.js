@@ -60,7 +60,11 @@ async function startDiscord({ config, trader, runOptimization }) {
         `**ربح/خسارة اليوم:** ${fmt(s.daily.pnl)} USDT`,
       ];
       lines.push(`**الاستراتيجية:** ${trader.strategy ? `${trader.strategy.name} ${config.strategy.mode === 'auto' ? '(مختارة تلقائيًا)' : '(ثابتة)'}` : '⛔ ما فيه استراتيجية ناجحة حاليًا'}`);
-      if (sig) lines.push(`**آخر إشارة:** ${sig.signal}`);
+      if (sig) lines.push(`**آخر إشارة:** ${sig.signal} (شمعة ${sig.candle?.slice(11, 16) ?? '-'} UTC)`);
+      if (trader.lastPrice) {
+        const age = Math.round((Date.now() - trader.lastPriceAt) / 1000);
+        lines.push(`**آخر سعر:** ${trader.lastPrice} (قبل ${age} ثانية)`);
+      }
       if (s.position) {
         const ticker = await trader.exchange.fetchTicker(config.strategy.symbol);
         const change = ((ticker.last - s.position.entryPrice) / s.position.entryPrice) * 100;
@@ -96,7 +100,7 @@ async function startDiscord({ config, trader, runOptimization }) {
 
     async close() {
       if (!trader.state.position) return 'ما فيه صفقة مفتوحة.';
-      const pnl = await trader.closePosition('بيع يدوي');
+      const pnl = await trader.closeNow('بيع يدوي');
       return `تم البيع. الربح/الخسارة: ${fmt(pnl)} USDT`;
     },
 

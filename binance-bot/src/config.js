@@ -30,7 +30,7 @@ const config = {
   },
   optimize: {
     days: num('OPTIMIZE_DAYS', 60),
-    everyHours: num('OPTIMIZE_EVERY_HOURS', 24),
+    everyHours: num('OPTIMIZE_EVERY_HOURS', 6),
   },
   risk: {
     tradeAmountUsdt: num('TRADE_AMOUNT_USDT', 10),
@@ -38,7 +38,7 @@ const config = {
     takeProfitPct: num('TAKE_PROFIT_PCT', 4),
     maxDailyLossUsdt: num('MAX_DAILY_LOSS_USDT', 5),
   },
-  loopSeconds: num('LOOP_SECONDS', 60),
+  loopSeconds: num('LOOP_SECONDS', 10),
 };
 
 if (config.strategy.mode !== 'auto' && !getStrategy(config.strategy.mode)) {

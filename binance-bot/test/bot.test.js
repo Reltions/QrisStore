@@ -195,3 +195,38 @@ test('auto mode switches to the best strategy and trades with it', async () => {
   await trader.tick();
   assert.strictEqual(ex.orders[0].side, 'buy');
 });
+
+test('live price update triggers take profit instantly', async () => {
+  const ex = fakeExchange(BREAKOUT);
+  const trader = makeTrader(ex);
+  await trader.tick();
+  assert.ok(trader.state.position);
+  await trader.onPrice(111); // +0.9%، ما يبيع
+  assert.ok(trader.state.position);
+  ex.price = 115;
+  await trader.onPrice(115); // +4.5%، جني ربح
+  assert.strictEqual(trader.state.position, null);
+  assert.ok(trader.state.trades[0].reason.includes('جني ربح'));
+  assert.ok(trader.state.trades[0].pnl > 0);
+});
+
+test('does not buy again on the same candle after a stop loss', async () => {
+  const ex = fakeExchange(BREAKOUT);
+  const trader = makeTrader(ex);
+  await trader.tick();
+  ex.price = 100;
+  await trader.onPrice(100); // وقف خسارة
+  assert.strictEqual(trader.state.position, null);
+  ex.price = 110;
+  await trader.tick(); // نفس الشمعة ونفس الإشارة
+  assert.strictEqual(ex.orders.filter((o) => o.side === 'buy').length, 1);
+});
+
+test('concurrent sells never sell the same position twice', async () => {
+  const ex = fakeExchange(BREAKOUT);
+  const trader = makeTrader(ex);
+  await trader.tick();
+  ex.price = 100;
+  await Promise.all([trader.onPrice(100), trader.closeNow('يدوي'), trader.tick()]);
+  assert.strictEqual(ex.orders.filter((o) => o.side === 'sell').length, 1);
+});
