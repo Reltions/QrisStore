@@ -1,0 +1,21 @@
+{
+  "name": "binance-discord-bot",
+  "version": "1.0.0",
+  "description": "Binance spot trading bot controlled from Discord (testnet by default)",
+  "main": "src/index.js",
+  "type": "commonjs",
+  "private": true,
+  "scripts": {
+    "start": "node src/index.js",
+    "backtest": "node src/backtest.js",
+    "test": "node --test test/*.test.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "ccxt": "^4.4.0",
+    "discord.js": "^14.16.0",
+    "dotenv": "^16.4.0"
+  }
+}
